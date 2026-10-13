@@ -15,3 +15,4 @@ target
 
 # compiled parser, checked in: see build.clj
 !/classes/
+!/classes/**/*.class
