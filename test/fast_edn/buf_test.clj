@@ -7,7 +7,7 @@
    [clojure.test :refer [deftest is are testing]]
    [clojure.test.generative :refer [defspec]]
    [clojure.test.generative.runner :as runner]
-   [fast-edn.core :as edn]
+   [dazld.fast-edn.core :as edn]
    [fast-edn.generators :as cgen])
   (:import
    [java.io FilterReader StringReader]))

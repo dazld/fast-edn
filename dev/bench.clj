@@ -10,7 +10,7 @@
    [cognitect.transit :as transit]
    [criterium.core :as criterium]
    [fast-edn.generators :as cgen]
-   [fast-edn.core :as fast-edn]
+   [dazld.fast-edn.core :as fast-edn]
    [jsonista.core :as jsonista])
   (:import
    [com.sun.management ThreadMXBean]
@@ -269,7 +269,7 @@
 
 (comment
   (gen-ints 1400)
-  (quick-bench (fast-edn.core/read-string ints-1400))
+  (quick-bench (dazld.fast-edn.core/read-string ints-1400))
   (bench {:files #"ints_\d+\.edn"}))
 
 ; ┌───────────┬─────────────┬──────────────┬──────────┐
@@ -408,7 +408,7 @@
   (quick-bench
     (clojure.instant/read-instant-date "2024-12-17T15:54:00.000+01:00"))
   (quick-bench
-    (fast-edn.core/read-instant-date "2024-12-17T15:54:00.000+01:00")))
+    (dazld.fast-edn.core/read-instant-date "2024-12-17T15:54:00.000+01:00")))
 
 (defn -main [& {:as opts}]
   (let [profile (or (:profile opts) :quick)]

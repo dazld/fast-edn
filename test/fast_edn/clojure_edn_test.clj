@@ -5,7 +5,7 @@
   (:require
    [clojure.edn]
    [clojure.test :refer [deftest is]]
-   [fast-edn.core :as edn]))
+   [dazld.fast-edn.core :as edn]))
 
 (defn- kind [x]
   (cond

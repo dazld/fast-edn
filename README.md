@@ -28,6 +28,11 @@
 > `test/fast_edn/clojure_edn_test.clj` checks parity against `clojure.edn` over
 > every literal in the example suite plus fuzzed tokens and timestamps.
 >
+> The namespace is `dazld.fast-edn.core` and the Java package `dazld.fast_edn`,
+> so this fork and upstream fast-edn can never shadow each other on one
+> classpath. The Compatibility section below describes upstream; in this fork
+> every input there reads as it does in `clojure.edn`.
+>
 > Requires Java 11. The compiled parser is checked in under `classes/`, so the
 > repository works as a plain git dependency. After changing the Java source,
 > run `clojure -T:build compile` and commit `classes/`; CI checks they match.
@@ -36,7 +41,7 @@
 
 Fast EDN is a drop-in replacement for `clojure.edn/read-string` that is roughly 5-7 times faster:
 
-| Test file         | clojure.edn | fast-edn.core | speed up, times |
+| Test file         | clojure.edn | dazld.fast-edn.core | speed up, times |
 | :---              |        ---: |          ---: |            ---: |
 | basic_10          |       0.314 |         0.222 |          ×  1.4 |
 | basic_100         |       1.773 |         0.414 |          ×  4.3 |
@@ -103,22 +108,22 @@ Fast EDN has more consistent error reporting. Clojure:
 Fast EDN includes location information in exceptions:
 
 ```clojure
-(fast-edn.core/read-string "1a")
+(dazld.fast-edn.core/read-string "1a")
 ; => NumberFormatException: For input string: "1a", offset: 2, context:
 ;    1a
 ;     ^
 
-(fast-edn.core/read-string "{:a 1 :b")
+(dazld.fast-edn.core/read-string "{:a 1 :b")
 ; => RuntimeException: Map literal must contain an even number of forms: {:a 1, :b, offset: 8, context:
 ;    {:a 1 :b
 ;           ^
 
-(fast-edn.core/read-string "\"{:a 1 :b")
+(dazld.fast-edn.core/read-string "\"{:a 1 :b")
 ; => RuntimeException: EOF while reading string: "{:a 1 :b, offset: 9, context:
 ;    "{:a 1 :b
 ;            ^
 
-(fast-edn.core/read-string "\"\\u123\"")
+(dazld.fast-edn.core/read-string "\"\\u123\"")
 ; => RuntimeException: Unexpected digit: ", offset: 7, context:
 ;    "\u123"
 ;          ^
@@ -144,7 +149,7 @@ io.github.tonsky/fast-edn {:mvn/version "1.2.0"}
 `read-string` works exactly the same as in `clojure.edn`:
 
 ```clojure
-(require '[fast-edn.core :as edn])
+(require '[dazld.fast-edn.core :as edn])
 
 ;; Read from string
 (edn/read-string "{:a 1}")
@@ -157,7 +162,7 @@ io.github.tonsky/fast-edn {:mvn/version "1.2.0"}
               (clojure.core/tagged-literal tag value))})
 ```
 
-In addition to strings, `fast-edn.core/read-once` allows you to read from `InputStream`, `File`, `byte[]`, `char[]` and `String`:
+In addition to strings, `dazld.fast-edn.core/read-once` allows you to read from `InputStream`, `File`, `byte[]`, `char[]` and `String`:
 
 ```clojure
 (edn/read-once (io/file "data.edn"))
@@ -176,9 +181,9 @@ Consuming multiple sequential objects from the same Reader/InputStream is possib
 In Fast EDN:
 
 ```clojure
-(let [p (fast-edn.core/parser {:eof ::eof} reader)]
+(let [p (dazld.fast-edn.core/parser {:eof ::eof} reader)]
   (take-while #(not= ::eof %)
-    (repeatedly #(fast-edn.core/read-next p))))
+    (repeatedly #(dazld.fast-edn.core/read-next p))))
 ```
 
 ## Compatibility
@@ -195,13 +200,13 @@ We also _extend_ what can be read where it made sense/made things more consisten
 (clojure.edn/read-string "0xFF/0x02")
 ; => NumberFormatException: Invalid number: 0xFF/0x02
 
-(fast-edn.core/read-string "0xFF/0x02")
+(dazld.fast-edn.core/read-string "0xFF/0x02")
 ; => 255/2
 
 (clojure.edn/read-string "2r1111N")
 ; => NumberFormatException: For input string: "1111N" under radix 2
 
-(fast-edn.core/read-string "2r1111N")
+(dazld.fast-edn.core/read-string "2r1111N")
 ; => 15N
 ```
 
@@ -221,7 +226,7 @@ Same goes for keywords starting with a number. Clojure allows `:1a` but not `:ns
 (clojure.edn/read-string ":ns/1a")
 ; => RuntimeException: Invalid token: :ns/1a
 
-(fast-edn.core/read-string ":ns/1a")
+(dazld.fast-edn.core/read-string ":ns/1a")
 ; => :ns/1a
 ```
 
@@ -231,7 +236,7 @@ We also support vectors in metadata since Clojure supports them and EDN parser w
 (clojure.edn/read-string "^[tag] {}")
 ; => IllegalArgumentException: Metadata must be Symbol,Keyword,String or Map
 
-(fast-edn.core/read-string "^[tag] {}")
+(dazld.fast-edn.core/read-string "^[tag] {}")
 ; => {:param-tags ['tag]} {}
 ```
 

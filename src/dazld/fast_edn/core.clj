@@ -1,4 +1,4 @@
-(ns fast-edn.core
+(ns dazld.fast-edn.core
   (:refer-clojure :exclude [default-data-readers merge read read-string])
   (:require
    [clojure.instant]
@@ -7,7 +7,7 @@
    [java.io ByteArrayInputStream CharArrayReader File FileReader InputStream InputStreamReader Reader StringReader]
    [java.time ZonedDateTime ZoneOffset]
    [java.util Date]
-   [fast_edn EdnParser]))
+   [dazld.fast_edn EdnParser]))
 
 (defn- merge [m1 m2]
   (if (empty? m2)

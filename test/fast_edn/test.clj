@@ -1,6 +1,6 @@
 (ns fast-edn.test
   (:require
-   [fast-edn.core :as edn]
+   [dazld.fast-edn.core :as edn]
    [clojure.edn]
    [clojure.java.io :as io]
    [clojure.string :as str]

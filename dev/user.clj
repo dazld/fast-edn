@@ -19,7 +19,7 @@
    :no-reload '#{user}})
 
 (defn compile-java []
-  (virgil/compile-java ["src/fast_edn"]))
+  (virgil/compile-java ["src/dazld/fast_edn"]))
 
 (defn reload []
   (compile-java)

@@ -1,4 +1,4 @@
-package fast_edn;
+package dazld.fast_edn;
 
 import clojure.lang.*;
 import java.io.*;
