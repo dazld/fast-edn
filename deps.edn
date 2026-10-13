@@ -1,10 +1,6 @@
-{:paths ["src" "target/classes"]
+{:paths ["src" "classes"]
  :deps
  {org.clojure/clojure {:mvn/version "1.12.5"}}
- :deps/prep-lib
- {:alias  :build
-  :fn     compile
-  :ensure "target/classes"}
  :aliases
  {:build
   {:deps       {io.github.clojure/tools.build {:mvn/version "0.10.14"}}

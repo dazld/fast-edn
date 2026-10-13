@@ -28,8 +28,9 @@
 > `test/fast_edn/clojure_edn_test.clj` checks parity against `clojure.edn` over
 > every literal in the example suite plus fuzzed tokens and timestamps.
 >
-> Requires Java 11. As a git dependency, run `clojure -X:deps prep` once to
-> compile the parser.
+> Requires Java 11. The compiled parser is checked in under `classes/`, so the
+> repository works as a plain git dependency. After changing the Java source,
+> run `clojure -T:build compile` and commit `classes/`; CI checks they match.
 
 > EDN format is very similar to JSON, thus it should parse as fast as JSON.
 

@@ -15,7 +15,7 @@ Reads exactly what `clojure.edn` reads, and fails where it fails:
 
 Faster keywords: one-pass scan against a character-class table, and a process-wide keyword cache.
 
-Requires Java 11. Adds `:deps/prep-lib` so the repository works as a git dependency.
+Requires Java 11. The compiled parser is checked in under `classes/`, so the repository works as a git dependency.
 
 ### 1.2.0 - July 7, 2026
 

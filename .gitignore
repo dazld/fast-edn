@@ -12,3 +12,6 @@ target
 .idea
 *.iml
 .vibe
+
+# compiled parser, checked in: see build.clj
+!/classes/
