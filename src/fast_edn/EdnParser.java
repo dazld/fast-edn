@@ -2,6 +2,8 @@ package fast_edn;
 
 import clojure.lang.*;
 import java.io.*;
+import java.lang.invoke.*;
+import java.lang.reflect.Field;
 import java.math.*;
 import java.util.*;
 import java.util.function.*;
@@ -11,6 +13,124 @@ import java.util.stream.*;
 public class EdnParser {
   public final static Keyword TAG_KEY = Keyword.intern(null, "tag");
   public final static Keyword PARAM_TAGS_KEY = Keyword.intern(null, "param-tags");
+
+  // Symbol, keyword and number tokens mean what clojure.lang.EdnReader says they
+  // mean: anything off the fast paths is handed to its own interpretToken and
+  // matchNumber, and ##NaN/##Inf/##-Inf are its boxed instances, so values from
+  // both readers are `=`. A Clojure release that renames these fails class init.
+  static final MethodHandle INTERPRET_TOKEN;
+  static final MethodHandle MATCH_NUMBER;
+  static final Double NAN;
+  static final Double POSITIVE_INFINITY;
+  static final Double NEGATIVE_INFINITY;
+
+  static {
+    try {
+      MethodHandles.Lookup lookup = MethodHandles.privateLookupIn(EdnReader.class, MethodHandles.lookup());
+      MethodType type = MethodType.methodType(Object.class, String.class);
+      INTERPRET_TOKEN = lookup.findStatic(EdnReader.class, "interpretToken", type);
+      MATCH_NUMBER    = lookup.findStatic(EdnReader.class, "matchNumber", type);
+      Field specialsField = Class.forName("clojure.lang.EdnReader$SymbolicValueReader").getDeclaredField("specials");
+      specialsField.setAccessible(true);
+      IPersistentMap specials = (IPersistentMap) specialsField.get(null);
+      NAN               = (Double) specials.valAt(Symbol.intern("NaN"));
+      POSITIVE_INFINITY = (Double) specials.valAt(Symbol.intern("Inf"));
+      NEGATIVE_INFINITY = (Double) specials.valAt(Symbol.intern("-Inf"));
+    } catch (ReflectiveOperationException e) {
+      throw new ExceptionInInitializerError(e);
+    }
+  }
+
+  // True for yyyy-MM-ddTHH:mm:ss[.f{1,9}] with Z or +-HH:mm, year 1583 or later,
+  // seconds up to 59 and offset hours up to 17: the timestamps whose java.time
+  // reading equals clojure.instant's. Every other #inst goes to clojure.instant.
+  public static boolean isPlainTimestamp(CharSequence cs) {
+    int n = cs.length();
+    if (n < 20
+        || !isDigits(cs, 0, 4) || cs.charAt(4) != '-'
+        || !isDigits(cs, 5, 7) || cs.charAt(7) != '-'
+        || !isDigits(cs, 8, 10) || cs.charAt(10) != 'T'
+        || !isDigits(cs, 11, 13) || cs.charAt(13) != ':'
+        || !isDigits(cs, 14, 16) || cs.charAt(16) != ':'
+        || !isDigits(cs, 17, 19)
+        || digitsValue(cs, 0, 4) < 1583
+        || digitsValue(cs, 17, 19) > 59) {
+      return false;
+    }
+    int i = 19;
+    if (cs.charAt(i) == '.') {
+      int fractionStart = ++i;
+      while (i < n && cs.charAt(i) >= '0' && cs.charAt(i) <= '9') {
+        ++i;
+      }
+      if (i == fractionStart || i - fractionStart > 9) {
+        return false;
+      }
+    }
+    if (i == n - 1) {
+      return cs.charAt(i) == 'Z';
+    }
+    return i == n - 6
+      && (cs.charAt(i) == '+' || cs.charAt(i) == '-')
+      && isDigits(cs, i + 1, i + 3) && cs.charAt(i + 3) == ':' && isDigits(cs, i + 4, i + 6)
+      && digitsValue(cs, i + 1, i + 3) <= 17
+      && digitsValue(cs, i + 4, i + 6) <= 59;
+  }
+
+  static boolean isDigits(CharSequence cs, int from, int to) {
+    for (int i = from; i < to; ++i) {
+      char ch = cs.charAt(i);
+      if (ch < '0' || ch > '9') {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  static int digitsValue(CharSequence cs, int from, int to) {
+    int value = 0;
+    for (int i = from; i < to; ++i) {
+      value = value * 10 + (cs.charAt(i) - '0');
+    }
+    return value;
+  }
+
+  public static boolean isNonConstituent(char ch) {
+    return ch == '@' || ch == '`' || ch == '~';
+  }
+
+  public Object interpretToken(String s) {
+    if (s.length() > 0 && isNonConstituent(s.charAt(0))) {
+      throw new RuntimeException("Invalid leading character: " + s.charAt(0) + context());
+    }
+    for (int i = 1; i < s.length(); ++i) {
+      if (isNonConstituent(s.charAt(i))) {
+        throw new RuntimeException("Invalid constituent character: " + s.charAt(i) + context());
+      }
+    }
+    try {
+      return (Object) INTERPRET_TOKEN.invokeExact(s);
+    } catch (RuntimeException e) {
+      throw e;
+    } catch (Throwable t) {
+      throw Util.sneakyThrow(t);
+    }
+  }
+
+  public Number matchNumber(String s) {
+    Object n;
+    try {
+      n = (Object) MATCH_NUMBER.invokeExact(s);
+    } catch (RuntimeException e) {
+      throw e;
+    } catch (Throwable t) {
+      throw Util.sneakyThrow(t);
+    }
+    if (n == null) {
+      throw new NumberFormatException("Invalid number: " + s + context());
+    }
+    return (Number) n;
+  }
 
   public final boolean countLines;
   public final ILookup dataReaders;
@@ -341,6 +461,34 @@ public class EdnParser {
     return (char) value;
   }
 
+  // Digits of a string's \\u or octal escape, read as EdnReader.readUnicodeChar
+  // reads them: Character.digit, ending early only at whitespace or a macro char.
+  public int readEscapeDigits(int initch, int base, int length, boolean exact) {
+    int value = Character.digit(initch, base);
+    if (value == -1) {
+      throw new RuntimeException("Invalid digit: " + (char) initch + context());
+    }
+    int i = 1;
+    for (; i < length; ++i) {
+      int ch = read();
+      if (ch == -1 || isWhitespace(ch) || isMacro(ch)) {
+        if (ch != -1) {
+          unread();
+        }
+        break;
+      }
+      int digit = Character.digit(ch, base);
+      if (digit == -1) {
+        throw new RuntimeException("Invalid digit: " + (char) ch + context());
+      }
+      value = value * base + digit;
+    }
+    if (i != length && exact) {
+      throw new RuntimeException("Invalid character length: " + i + ", should be: " + length + context());
+    }
+    return value;
+  }
+
   public String readStringComplex(char[] buf, int start, int pos) {
     accumulatorLength = 0;
     accumulatorAppend(buf, start, pos);
@@ -369,12 +517,19 @@ public class EdnParser {
           } else if (ch2 == 'r') {
             accumulatorAppend('\r');
           } else if (ch2 == 'u') {
-            accumulatorAppend(readUnicodeChar());
+            int ch3 = read();
+            if (Character.digit(ch3, 16) == -1) {
+              throw new RuntimeException("Invalid unicode escape: \\u" + (char) ch3 + context());
+            }
+            accumulatorAppend((char) readEscapeDigits(ch3, 16, 4, true));
           } else if (ch2 == 't') {
             accumulatorAppend('\t');
-          } else if (ch2 >= '0' && ch2 <= '7') {
-            unread();
-            accumulatorAppend(readOctalChar());
+          } else if (ch2 != -1 && Character.isDigit(ch2)) {
+            int value = readEscapeDigits(ch2, 8, 3, false);
+            if (value > 0377) {
+              throw new RuntimeException("Octal escape sequence must be in range [0, 377], got: " + Integer.toString(value, 8) + context());
+            }
+            accumulatorAppend((char) value);
           } else if (ch2 == 'b') {
             accumulatorAppend('\b');
           } else if (ch2 == 'f') {
@@ -406,59 +561,76 @@ public class EdnParser {
   // readCharacter //
   ///////////////////
 
+  // Character literals as EdnReader.CharacterReader reads them: the token runs to
+  // whitespace or a terminating macro char, and its digits go through Character.digit.
   public Character readCharacter() {
     int ch = read();
-    
+
     if (-1 == ch) {
       throw new RuntimeException("EOF while reading character" + context());
     }
 
-    int peek = read();
-    unread();
-
-    if (peek == -1 || isBoundary(peek)) {
-      return (char) ch;
+    StringBuilder sb = new StringBuilder();
+    sb.append((char) ch);
+    for (int next = read(); next != -1; next = read()) {
+      if (isBoundary(next)) {
+        unread();
+        break;
+      }
+      if (isNonConstituent((char) next)) {
+        throw new RuntimeException("Invalid constituent character: " + (char) next + context());
+      }
+      sb.append((char) next);
     }
+    String token = sb.toString();
 
-    if (ch == 'u') {
-      ch = readUnicodeChar();
-      if (!peekBoundary()) {
-        String rest = continueReadingUntilBoundary("");
-        throw new RuntimeException("Invalid character constant: \\u" + String.format("%04x", ch) + rest + context());
-      }
-      // surrogate code unit?
-      if (ch >= 0xD800 && ch <= 0xDFFF) {
-        throw new RuntimeException("Invalid character constant: \\u" + String.format("%04x", ch) + context());
-      }
-      return Character.valueOf((char) ch);
-    } else if (ch == 'o') {
-      if (peek < '0' || peek > '7') {
-        String rest = continueReadingUntilBoundary("");
-        throw new RuntimeException("Invalid character constant: \\o" + rest + context());
-      }
-      ch = readOctalChar();
-      if (!peekBoundary()) {
-        String rest = continueReadingUntilBoundary("");
-        throw new RuntimeException("Invalid character constant: \\o" + Integer.toString(ch, 8) + rest + context());
-      }
-      return Character.valueOf((char) ch);
-    }
-    // important that all constants start with different letter
-    else if (compareNext(ch, "newline", "Invalid character constant: \\")) {
+    if (token.length() == 1) {
+      return Character.valueOf(token.charAt(0));
+    } else if (token.equals("newline")) {
       return '\n';
-    } else if (compareNext(ch, "return", "Invalid character constant: \\")) {
-      return '\r';
-    } else if (compareNext(ch, "space", "Invalid character constant: \\")) {
+    } else if (token.equals("space")) {
       return ' ';
-    } else if (compareNext(ch, "tab", "Invalid character constant: \\")) {
+    } else if (token.equals("tab")) {
       return '\t';
-    } else if (compareNext(ch, "backspace", "Invalid character constant: \\")) {
+    } else if (token.equals("backspace")) {
       return '\b';
-    } else if (compareNext(ch, "formfeed", "Invalid character constant: \\")) {
+    } else if (token.equals("formfeed")) {
       return '\f';
+    } else if (token.equals("return")) {
+      return '\r';
+    } else if (token.startsWith("u")) {
+      char c = (char) tokenDigits(token, 1, 4, 16);
+      if (c >= '\uD800' && c <= '\uDFFF') {
+        throw new RuntimeException("Invalid character constant: \\u" + Integer.toString(c, 16) + context());
+      }
+      return c;
+    } else if (token.startsWith("o")) {
+      int len = token.length() - 1;
+      if (len > 3) {
+        throw new RuntimeException("Invalid octal escape sequence length: " + len + context());
+      }
+      int uc = tokenDigits(token, 1, len, 8);
+      if (uc > 0377) {
+        throw new RuntimeException("Octal escape sequence must be in range [0, 377]." + context());
+      }
+      return (char) uc;
     }
+    throw new RuntimeException("Unsupported character: \\" + token + context());
+  }
 
-    throw new RuntimeException("Error parsing character" + context());
+  public int tokenDigits(String token, int offset, int length, int base) {
+    if (token.length() != offset + length) {
+      throw new IllegalArgumentException("Invalid unicode character: \\" + token + context());
+    }
+    int value = 0;
+    for (int i = offset; i < offset + length; ++i) {
+      int digit = Character.digit(token.charAt(i), base);
+      if (digit == -1) {
+        throw new IllegalArgumentException("Invalid digit: " + token.charAt(i) + context());
+      }
+      value = value * base + digit;
+    }
+    return value;
   }
 
 
@@ -544,46 +716,21 @@ public class EdnParser {
   }
 
   public Object finalizeSymbol(char[] buf, int start, int slash, int end) {
-    if (end == start) {
-      throw new RuntimeException("Symbol can't be empty" + context());
-    }
+    int len = end - start;
 
-    // issue-16 -- ' ` ~ @ are not allowed at the beginning of a symbol
-    char first = buf[start];
-    if (first == '\'' || first == '@' || first == '`' || first == '~') {
-      throw new RuntimeException("Invalid leading character: " + first + context());
-    }
-
-    if (1 == end - start && buf[start] == '/') {
-      return Symbol.intern(null, "/");
-    }
-
-    if (3 == end - start && buf[start] == 'n' && buf[start + 1] == 'i' && buf[start + 2] == 'l') {
+    if (3 == len && buf[start] == 'n' && buf[start + 1] == 'i' && buf[start + 2] == 'l') {
       return null;
     }
 
-    if (4 == end - start && buf[start] == 't' && buf[start + 1] == 'r' && buf[start + 2] == 'u' && buf[start + 3] == 'e') {
+    if (4 == len && buf[start] == 't' && buf[start + 1] == 'r' && buf[start + 2] == 'u' && buf[start + 3] == 'e') {
       return Boolean.TRUE;
     }
 
-    if (5 == end - start && buf[start] == 'f' && buf[start + 1] == 'a' && buf[start + 2] == 'l' && buf[start + 3] == 's' && buf[start + 4] == 'e') {
+    if (5 == len && buf[start] == 'f' && buf[start + 1] == 'a' && buf[start + 2] == 'l' && buf[start + 3] == 's' && buf[start + 4] == 'e') {
       return Boolean.FALSE;
     }
 
-    if (slash == -1) {
-      return Symbol.intern(null, new String(buf, start, end - start));
-    }
-
-    if (slash == start) {
-      throw new RuntimeException("Symbol's namespace can't be empty: " + new String(buf, start, end - start) + context());
-    }
-
-    if (slash == end - 1) {
-      throw new RuntimeException("Symbol's name can't be empty: " + new String(buf, start, end - start) + context());
-    }
-
-    return Symbol.intern(new String(buf, start, slash - start),
-                         new String(buf, slash + 1, end - (slash + 1)));
+    return interpretToken(new String(buf, start, len));
   }
 
 
@@ -596,11 +743,6 @@ public class EdnParser {
 
     if (tag instanceof Symbol) {
       Object value = readObject(true);
-
-      // don’t invoke tag handlers inside #_ (issue #28)
-      if (discardDepth > 0) {
-        return value;
-      }
 
       IFn dataReader = (IFn) RT.get(dataReaders, tag);
 
@@ -620,22 +762,34 @@ public class EdnParser {
   /////////////////
 
   public Keyword readKeyword() {
-    char[] buf   = readBuf;
-    int    start = readPos;
-    int    pos   = start;
-    int    len   = readLen;
-    int    slash = -1;
+    char[] buf     = readBuf;
+    int    start   = readPos;
+    int    pos     = start;
+    int    len     = readLen;
+    int    hash    = 0;
+    int    classes = 0;
     for (; pos < len; ++pos) {
       char ch = buf[pos];
-      if (isBoundary(ch)) {
-        readPos = pos;
-        return finalizeKeyword(buf, start, slash, pos);
-      } else if (ch == '/' && slash == -1) {
-        slash = pos;
+      if (ch < 0x80) {
+        int cls = CHAR_CLASS[ch];
+        if ((cls & C_BOUNDARY) != 0) {
+          break;
+        }
+        classes |= cls;
+      } else if (Character.isWhitespace(ch)) {
+        break;
       }
+      hash = 31 * hash + ch;
+    }
+    if (pos < len) {
+      readPos = pos;
+      if (pos == start || (classes & C_KEYWORD_SPECIAL) != 0) {
+        return finalizeKeyword(buf, start, -1, pos);
+      }
+      return internPlainKeyword(buf, start, pos, hash);
     }
     readPos = pos;
-    return readKeywordComplex(buf, start, slash, pos);
+    return readKeywordComplex(buf, start, -1, pos);
   }
 
   public Keyword readKeywordComplex(char[] buf, int start, int slash, int pos) {
@@ -673,32 +827,49 @@ public class EdnParser {
 
   public Keyword finalizeKeyword(char[] buf, int start, int slash, int end) {
     if (end == start) {
-      throw new RuntimeException("Keyword can't be empty" + context());
+      return (Keyword) interpretToken(":");
     }
 
-    // issue-9 -- keyword can start with colon
-    if (buf[start] == ':') {
-      throw new RuntimeException("Keyword can't start with: ::" + context());
+    for (int i = start; i < end; ++i) {
+      char ch = buf[i];
+      if (ch == ':' || ch == '/' || isNonConstituent(ch)) {
+        return (Keyword) interpretToken(":" + new String(buf, start, end - start));
+      }
     }
 
-    if (1 == end - start && buf[start] == '/') {
-      return Keyword.intern(Symbol.intern(null, "/"));
+    int hash = 0;
+    for (int i = start; i < end; ++i) {
+      hash = 31 * hash + buf[i];
     }
+    return internPlainKeyword(buf, start, end, hash);
+  }
 
-    if (slash == -1) {
-      return Keyword.intern(Symbol.intern(null, new String(buf, start, end - start)));
+  // Plain keyword names repeat heavily across documents; this table returns the
+  // interned Keyword for a repeat without allocating its String or Symbol. Shared
+  // by all parsers: an entry is immutable, so a racing overwrite only costs a miss.
+  public static final class KeywordEntry {
+    final char[]  chars;
+    final Keyword keyword;
+
+    KeywordEntry(char[] chars, Keyword keyword) {
+      this.chars   = chars;
+      this.keyword = keyword;
     }
+  }
 
-    if (slash == start) {
-      throw new RuntimeException("Keyword's namespace can't be empty: " + new String(buf, start, end - start) + context());
+  public static final KeywordEntry[] KEYWORD_CACHE = new KeywordEntry[4096];
+
+  public static Keyword internPlainKeyword(char[] buf, int start, int end, int hash) {
+    int len  = end - start;
+    int slot = (hash ^ (hash >>> 16)) & (KEYWORD_CACHE.length - 1);
+    KeywordEntry entry = KEYWORD_CACHE[slot];
+    if (entry != null && Arrays.equals(entry.chars, 0, entry.chars.length, buf, start, end)) {
+      return entry.keyword;
     }
-
-    if (slash == end - 1) {
-      throw new RuntimeException("Keyword's name can't be empty: " + new String(buf, start, end - start) + context());
-    }
-
-    return Keyword.intern(Symbol.intern(new String(buf, start, slash - start),
-                                        new String(buf, slash + 1, end - (slash + 1))));
+    char[]  chars = Arrays.copyOfRange(buf, start, end);
+    Keyword kw    = Keyword.intern(Symbol.intern(null, new String(chars)));
+    KEYWORD_CACHE[slot] = new KeywordEntry(chars, kw);
+    return kw;
   }
 
 
@@ -707,6 +878,14 @@ public class EdnParser {
   ////////////////
 
   public Number readNumber() {
+    return readNumber(false);
+  }
+
+  public Number readNumberNegative() {
+    return readNumber(true);
+  }
+
+  public Number readNumber(boolean negative) {
     char[] buf   = readBuf;
     int    start = readPos;
     int    pos   = start;
@@ -719,41 +898,27 @@ public class EdnParser {
         val = val * 10 + ch - '0';
       } else if (isNumberBoundary(ch)) {
         int digits = pos - start;
-        // empty, e.g. denominator in "1/]"
-        if (digits == 0) {
+        // empty, octal, or can overflow long
+        if (digits == 0 || (digits > 1 && buf[start] == '0') || digits >= 19) {
           break;
         }
-
-        // octal
-        if (digits > 1 && buf[start] == '0') {
-          break;
-        }
-
-        // can overflow long
-        if (digits >= 19) {
-          break;
-        }
-
         readPos = pos;
-        return val;
+        return negative ? -val : val;
       } else {
         break;
       }
     }
 
     readPos = pos;
-    return readNumberComplex(buf, start, pos);
+    return readNumberToken(buf, start, pos, negative);
   }
 
-  public Number readNumberComplex(char[] buf, int start, int pos) {
+  public Number readNumberToken(char[] buf, int start, int pos, boolean negative) {
     accumulatorLength = 0;
+    if (negative) {
+      accumulatorAppend('-');
+    }
     accumulatorAppend(buf, start, pos);
-
-    boolean isInt         = false;
-    boolean isFloat       = false;
-    boolean isRatio       = false;
-    int     radixPos      = -1;
-    boolean misplacedSign = false;
 
     outer:
     while (!isEOF) {
@@ -763,35 +928,9 @@ public class EdnParser {
       int len = readLen;
 
       for (; pos < len; ++pos) {
-        char ch = buf[pos];
-        if (ch >= '0' && ch <= '9') {
-          // pass
-        } else if (isNumberBoundary(ch)) {
+        if (isNumberBoundary(buf[pos])) {
           accumulatorAppend(buf, start, pos);
           readPos = pos;
-          break outer;
-        } else if (ch == '+' || ch == '-') {
-          if (accumulatorLength + (pos - start) == 0) {
-            // sign first char
-            continue;
-          }
-          char prev = pos > start ? buf[pos - 1] : accumulator[accumulatorLength - 1];
-          if (prev == 'e' || prev == 'E') {
-            // sign after exponent
-            continue;
-          }
-          misplacedSign = true;
-        } else if (!isInt && !isFloat && (ch == '.' || ch == 'e' || ch == 'E' || ch == 'M')) {
-          isFloat = true;
-        } else if (!isInt && !isFloat && (ch == 'x' || ch == 'X' || ch == 'N')) {
-          isInt = true;
-        } else if (radixPos == -1 && (ch == 'r' || ch == 'R')) {
-          radixPos = accumulatorLength + pos - start;
-          isInt = true;
-        } else if (ch == '/') {
-          accumulatorAppend(buf, start, pos);
-          readPos = pos + 1;
-          isRatio = true;
           break outer;
         }
       }
@@ -801,113 +940,49 @@ public class EdnParser {
       nextBuffer();
     }
 
-    if (misplacedSign) {
-      throw new RuntimeException("Invalid number: " + accumulatorToString() + context());
+    if (isPlainFloat(accumulator, accumulatorLength)) {
+      return Double.parseDouble(new String(accumulator, 0, accumulatorLength));
     }
-
-    if (isRatio) {
-      Number numerator = finalizeInt(accumulator, 0, radixPos, accumulatorLength);
-      return finalizeRatio(numerator);
-    }
-
-    if (isFloat) {
-      return finalizeFloat(accumulator, 0, accumulatorLength);
-    }
-
-    return finalizeInt(accumulator, 0, radixPos, accumulatorLength);
+    return matchNumber(accumulatorToString());
   }
 
-  public Number finalizeRatio(Number numerator) {
-    numerator = numerator instanceof BigInt ? Numbers.reduceBigInt((BigInt) numerator) : numerator;
-    if (!(numerator instanceof Long || numerator instanceof BigInteger)) {
-      throw new RuntimeException("Numerator can't be " + numerator.getClass().getName() + ": " + numerator + context());
+  // True when the token matches EdnReader's floatPat without its M suffix and
+  // has a '.' or exponent, so intPat cannot match it: [-+]?[0-9]+(\.[0-9]*)?([eE][-+]?[0-9]+)?
+  public static boolean isPlainFloat(char[] buf, int len) {
+    int i = 0;
+    if (i < len && (buf[i] == '-' || buf[i] == '+')) {
+      ++i;
     }
-    numerator = numerator instanceof Long ? BigInteger.valueOf((Long) numerator) : (BigInteger) numerator;
-
-    Number denominator = readNumber();
-    denominator = denominator instanceof BigInt ? Numbers.reduceBigInt((BigInt) denominator) : denominator;
-    if (!(denominator instanceof Long || denominator instanceof BigInteger)) {
-      throw new RuntimeException("Denominator can't be " + denominator.getClass().getName() + ": " + denominator + context());
+    int digitsStart = i;
+    while (i < len && buf[i] >= '0' && buf[i] <= '9') {
+      ++i;
     }
-    denominator = denominator instanceof Long ? BigInteger.valueOf((Long) denominator) : (BigInteger) denominator;
-
-    return Numbers.divide(numerator, denominator);
-  }
-
-  public Number finalizeFloat(char[] buf, int start, int end) {
-    int len = end - start;
-    if (buf[end - 1] == 'M') {
-      return new BigDecimal(buf, start, len - 1);
-    } else {
-      return Double.parseDouble(new String(buf, start, len));
+    if (i == digitsStart) {
+      return false;
     }
-  }
-
-  public Number finalizeInt(char[] buf, int start, int radixPos, int end) {
-    int radix = -1;
-    boolean forceBigInt = false;
-
-    if (end == start) {
-      throw new RuntimeException("Invalid number" + context());
-    }
-
-    if (radixPos != -1) {
-      radix = (int) Long.parseLong(new String(buf, start, radixPos - start), 10);
-      start = radixPos + 1;
-    }
-
-    // trailing N is a BigInt marker only if digits precede it, otherwise it's a digit itself
-    if (buf[end - 1] == 'N' && end - 1 > start) {
-      forceBigInt = true;
-      end = end - 1;
-    }
-
-    if (radix == -1 && buf[start] == '0') {
-      if (end - start >= 3 && (buf[start + 1] == 'x' || buf[start + 1] == 'X')) {
-        radix = 16;
-        start = start + 2;
-      } else if (end - start >= 2) {
-        radix = 8;
-        start = start + 1;
+    boolean floaty = false;
+    if (i < len && buf[i] == '.') {
+      floaty = true;
+      ++i;
+      while (i < len && buf[i] >= '0' && buf[i] <= '9') {
+        ++i;
       }
     }
-
-    if (radix == -1) {
-      radix = 10;
+    if (i < len && (buf[i] == 'e' || buf[i] == 'E')) {
+      floaty = true;
+      ++i;
+      if (i < len && (buf[i] == '-' || buf[i] == '+')) {
+        ++i;
+      }
+      int expStart = i;
+      while (i < len && buf[i] >= '0' && buf[i] <= '9') {
+        ++i;
+      }
+      if (i == expStart) {
+        return false;
+      }
     }
-
-    if (forceBigInt) {
-      String str = new String(buf, start, end - start);
-      BigInteger bn = new BigInteger(str, radix);
-      return BigInt.fromBigInteger(bn);
-    }
-
-    String str = new String(buf, start, end - start);
-    try {
-      return Long.valueOf(Long.parseLong(str, radix));
-    } catch (Exception e) {
-      BigInteger bn = new BigInteger(str, radix);
-      return BigInt.fromBigInteger(bn);
-    }
-  }
-
-  public Number readNumberNegative() {
-    Number n = readNumber();
-    if (n instanceof Long) {
-      return Long.valueOf(-((Long) n).longValue());
-    } else if (n instanceof Double) {
-      return Double.valueOf(-((Double) n).doubleValue());
-    } else if (n instanceof BigInt) {
-      return BigInt.fromBigInteger(((BigInt) n).toBigInteger().negate());
-    } else if (n instanceof BigDecimal) {
-      return ((BigDecimal) n).negate();
-    } else if (n instanceof Ratio) {
-      BigInteger numerator = ((Ratio) n).numerator;
-      BigInteger denominator = ((Ratio) n).denominator;
-      return new Ratio(numerator.negate(), denominator);
-    } else {
-      throw new RuntimeException("Unexpected number class " + toClassString(n) + context());
-    }
+    return floaty && i == len;
   }
 
   public Double readSymbolicValue() {
@@ -919,11 +994,11 @@ public class EdnParser {
 
     // important that all constants start with different letter
     if (compareNext(ch, "Inf", "Unknown symbolic value: ##")) {
-      return Double.POSITIVE_INFINITY;
+      return POSITIVE_INFINITY;
     } else if (compareNext(ch, "-Inf", "Unknown symbolic value: ##")) {
-      return Double.NEGATIVE_INFINITY;
+      return NEGATIVE_INFINITY;
     } else if (compareNext(ch, "NaN", "Unknown symbolic value: ##")) {
-      return Double.NaN;
+      return NAN;
     }
 
     String symbol = continueReadingUntilBoundary(String.valueOf((char) ch));
@@ -1080,17 +1155,15 @@ public class EdnParser {
 
     if (meta instanceof Symbol || meta instanceof String) {
       meta = RT.map(TAG_KEY, meta);
-    } else if (meta instanceof IPersistentVector) {
-      meta = RT.map(PARAM_TAGS_KEY, meta);
     } else if (meta instanceof Keyword) {
       meta = RT.map(meta, RT.T);
     } else if (!(meta instanceof IPersistentMap)) {
-      throw new RuntimeException("Metadata must be Symbol, Keyword, String, Map or Vector, got " + toClassString(meta) + context());
+      throw new RuntimeException("Metadata must be Symbol, Keyword, String or Map, got " + toClassString(meta) + context());
     }
 
     Object obj = readObject(true);
     if (!(obj instanceof IMeta)) {
-      throw new RuntimeException("Can't put meta on " + toClassString(obj) + context());
+      throw new RuntimeException("Metadata can only be applied to IMetas, got " + toClassString(obj) + context());
     }
 
     IPersistentMap objMeta = (IPersistentMap) RT.meta(obj);
@@ -1184,7 +1257,7 @@ public class EdnParser {
 
           if (-1 == ch2 || isBoundary(ch2)) {
             return Symbol.intern(null, "-");
-          } else if ('0' <= ch2 && ch2 <= '9') {
+          } else if (Character.isDigit(ch2)) {
             return readNumberNegative();
           } else {
             return continueReadingSymbol('-');
@@ -1205,7 +1278,7 @@ public class EdnParser {
 
           if (-1 == ch2 || isBoundary(ch2)) {
             return Symbol.intern(null, "+");
-          } else if ('0' <= ch2 && ch2 <= '9') {
+          } else if (Character.isDigit(ch2)) {
             return readNumber();
           } else {
             return continueReadingSymbol('+');
@@ -1237,16 +1310,14 @@ public class EdnParser {
             return readSymbolicValue();
           }
 
-          if (ch2 == ':') {
-            int ch3 = skipWhitespace();
-            if (ch3 == -1) {
-              throw new RuntimeException("EOF while reading namespaced map" + context());
-            }
-            unread();
-            Keyword ns = (Keyword) readKeyword();
+          if (ch2 == '^') {
+            return readMeta();
+          }
 
-            if (ns.getNamespace() != null) {
-              throw new RuntimeException("Namespaced map should use non-namespaced keyword: " + ns + context());
+          if (ch2 == ':') {
+            Object ns = readObject(true);
+            if (!(ns instanceof Symbol) || ((Symbol) ns).getNamespace() != null) {
+              throw new RuntimeException("Namespaced map must specify a valid namespace: " + ns + context());
             }
 
             int ch4 = skipWhitespace();
@@ -1254,7 +1325,7 @@ public class EdnParser {
               throw new RuntimeException("Namespaced map must specify a map: " + ns + context());
             }
 
-            return readMap(ns.getName());
+            return readMap(((Symbol) ns).getName());
           }
 
           unread();
@@ -1270,7 +1341,7 @@ public class EdnParser {
         }
 
         default: {
-          if ('0' <= ch1 && ch1 <= '9') {
+          if (Character.isDigit(ch1)) {
             unread();
             return readNumber();
           } else if (!isBoundary(ch1)) {
@@ -1292,6 +1363,15 @@ public class EdnParser {
   public static final BitSet whitespaceMask = new BitSet(0x30);
   public static final BitSet boundaryMask = new BitSet(0x80);
   public static final BitSet numberBoundaryMask = new BitSet(0x80);
+  public static final BitSet macroMask = new BitSet(0x80);
+
+  public static final byte   C_WHITESPACE       = 1;
+  public static final byte   C_BOUNDARY         = 2;
+  public static final byte   C_NUMBER_BOUNDARY  = 4;
+  public static final byte   C_MACRO            = 8;
+  // a keyword holding one of : / @ ` ~ is interpreted by EdnReader
+  public static final byte   C_KEYWORD_SPECIAL  = 16;
+  public static final byte[] CHAR_CLASS         = new byte[0x80];
   
   static {
     // ASCII whitespace as in Character.isWhitespace
@@ -1318,11 +1398,27 @@ public class EdnParser {
 
     numberBoundaryMask.or(boundaryMask);
     numberBoundaryMask.set('#');
-    numberBoundaryMask.set(':');
+
+    macroMask.or(numberBoundaryMask);
+    macroMask.andNot(whitespaceMask);
+
+    for (int ch = 0; ch < 0x80; ++ch) {
+      CHAR_CLASS[ch] = (byte) ((whitespaceMask.get(ch) ? C_WHITESPACE : 0)
+                             | (boundaryMask.get(ch) ? C_BOUNDARY : 0)
+                             | (numberBoundaryMask.get(ch) ? C_NUMBER_BOUNDARY : 0)
+                             | (macroMask.get(ch) ? C_MACRO : 0));
+    }
+    for (char ch : new char[] {':', '/', '@', '`', '~'}) {
+      CHAR_CLASS[ch] |= C_KEYWORD_SPECIAL;
+    }
   }
 
   public static boolean isWhitespace(int ch) {
-    return ch < 0x30 && whitespaceMask.get(ch);
+    return ch < 0x80 ? (ch >= 0 && (CHAR_CLASS[ch] & C_WHITESPACE) != 0) : Character.isWhitespace(ch);
+  }
+
+  public static boolean isMacro(int ch) {
+    return ch >= 0 && ch < 0x80 && (CHAR_CLASS[ch] & C_MACRO) != 0;
   }
 
   public static boolean isHexDigit(int ch) {
@@ -1330,11 +1426,11 @@ public class EdnParser {
   }
 
   public static boolean isBoundary(int ch) {
-    return ch < 0x80 && boundaryMask.get(ch);
+    return ch < 0x80 ? (ch >= 0 && (CHAR_CLASS[ch] & C_BOUNDARY) != 0) : Character.isWhitespace(ch);
   }
 
   public static boolean isNumberBoundary(int ch) {
-    return ch < 0x80 && numberBoundaryMask.get(ch);
+    return ch < 0x80 ? (ch >= 0 && (CHAR_CLASS[ch] & C_NUMBER_BOUNDARY) != 0) : Character.isWhitespace(ch);
   }
 
   public static String toClassString(Object o) {

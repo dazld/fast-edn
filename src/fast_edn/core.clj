@@ -1,6 +1,7 @@
 (ns fast-edn.core
   (:refer-clojure :exclude [default-data-readers merge read read-string])
   (:require
+   [clojure.instant]
    [clojure.java.io :as io])
   (:import
    [java.io ByteArrayInputStream CharArrayReader File FileReader InputStream InputStreamReader Reader StringReader]
@@ -16,7 +17,7 @@
 (defn construct-instant
   "Construct a java.time.Instant"
   [years months days hours minutes seconds nanoseconds offset-sign offset-hours offset-minutes]
-  (let [zone (ZoneOffset/ofHoursMinutes (* offset-sign offset-hours) offset-minutes)]
+  (let [zone (ZoneOffset/ofHoursMinutes (* offset-sign offset-hours) (* offset-sign offset-minutes))]
     (-> (ZonedDateTime/of years months days hours minutes seconds nanoseconds zone)
       (.toInstant))))
 
@@ -24,7 +25,7 @@
   "Construct a java.util.Date, which expresses the original instant as milliseconds since the epoch, UTC.
    Faster version of clojure.instant/construct-date"
   [years months days hours minutes seconds nanoseconds offset-sign offset-hours offset-minutes]
-  (let [zone (ZoneOffset/ofHoursMinutes (* offset-sign offset-hours) offset-minutes)]
+  (let [zone (ZoneOffset/ofHoursMinutes (* offset-sign offset-hours) (* offset-sign offset-minutes))]
     (-> (ZonedDateTime/of years months days hours minutes seconds nanoseconds zone)
       (.toInstant)
       (Date/from))))
@@ -36,9 +37,13 @@
   (EdnParser/parseTimestamp new-instant cs))
 
 (defn read-instant-date
-  "Faster version of clojure.instant/read-instant-date"
-  [^CharSequence cs]
-  (parse-timestamp construct-date cs))
+  "Faster version of clojure.instant/read-instant-date. Only timestamps whose
+   java.time reading is known to equal clojure.instant's take the fast path;
+   clojure.instant reads the rest."
+  [cs]
+  (if (and (instance? CharSequence cs) (EdnParser/isPlainTimestamp cs))
+    (parse-timestamp construct-date cs)
+    (clojure.instant/read-instant-date cs)))
 
 (def default-data-readers
   (assoc clojure.core/default-data-readers

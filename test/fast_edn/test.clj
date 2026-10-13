@@ -1,6 +1,7 @@
 (ns fast-edn.test
   (:require
    [fast-edn.core :as edn]
+   [clojure.edn]
    [clojure.java.io :as io]
    [clojure.string :as str]
    [clojure.test :refer [is are deftest testing]]))
@@ -120,7 +121,6 @@
     "\" \\b \\f \\ua66e \\uA66E \\0 \\12 \\176 \\377 \\1222 \\newline \"" " \b \f \ua66e \uA66E \0 \12 \176 \377 R2 \newline "
     
     ;; extras -- don't work in clojure.edn
-    "\"\\18\"" (str \o1 \8)
     )
 
   (are [s] (thrown? Exception (edn/read-string s))
@@ -154,7 +154,7 @@
     (testing (str "buffer " buf)
       (are [s m] (thrown-with-msg? Exception m (edn/read-string {:buffer buf} s))
         "{"       #"EOF while reading"
-        "abc/ "   #"Symbol's name can't be empty: abc/"
+        "abc/ "   #"Invalid token: abc/"
         "##-InF"  #"Unknown symbolic value: ##-InF"
         "##Inf-1" #"Unknown symbolic value: ##Inf-1"))))
 
@@ -199,30 +199,30 @@
     "\\space\"str\""       \space)
 
   (are [s m] (thrown-with-msg? Exception m (edn/read-string s))
-    "\\newlinefff" #"Invalid character constant: \\newlinefff, offset"
-    "\\newl"       #"Invalid character constant: \\newl, offset"
-    "\\newl],,  "  #"Invalid character constant: \\newl, offset"
-    "[\\newl]"     #"Invalid character constant: \\newl, offset"
-    "\\ret"        #"Invalid character constant: \\ret, offset"
-    "\\returns"    #"Invalid character constant: \\returns, offset"
-    "\\spacex"     #"Invalid character constant: \\spacex, offset"
-    "\\taboo"      #"Invalid character constant: \\taboo, offset"
-    "\\back"       #"Invalid character constant: \\back, offset"
-    "\\formfeed2"  #"Invalid character constant: \\formfeed2, offset"
+    "\\newlinefff" #"Unsupported character: \\newlinefff, offset"
+    "\\newl"       #"Unsupported character: \\newl, offset"
+    "\\newl],,  "  #"Unsupported character: \\newl, offset"
+    "[\\newl]"     #"Unsupported character: \\newl, offset"
+    "\\ret"        #"Unsupported character: \\ret, offset"
+    "\\returns"    #"Unsupported character: \\returns, offset"
+    "\\spacex"     #"Unsupported character: \\spacex, offset"
+    "\\taboo"      #"Unsupported character: \\taboo, offset"
+    "\\back"       #"Unsupported character: \\back, offset"
+    "\\formfeed2"  #"Unsupported character: \\formfeed2, offset"
     "\\uD800"      #"Invalid character constant: \\ud800, offset"
     "\\uDFFF"      #"Invalid character constant: \\udfff, offset"
 
-    ;; issue-8 -- octal and named characters must be followed by a boundary
-    "\\ua66ex"     #"Invalid character constant: \\ua66ex, offset"
-    "\\uA66EX"     #"Invalid character constant: \\ua66eX, offset"
-    "\\uz"         #"Unexpected digit: z, offset"
-    "\\u0z"        #"Unexpected digit: z, offset"
-    "\\oz"         #"Invalid character constant: \\oz, offset"
-    "\\ormfeed"    #"Invalid character constant: \\ormfeed, offset"
-    "\\o-1/2"      #"Invalid character constant: \\o-1/2, offset"
-    "#{\\o-1/2}"   #"Invalid character constant: \\o-1/2, offset"
-    "\\o12x"       #"Invalid character constant: \\o12x, offset"
-    "\\o8"         #"Invalid character constant: \\o8, offset")
+    ;; issue-8 -- unicode and octal characters must be exactly their digits
+    "\\ua66ex"     #"Invalid unicode character: \\ua66ex, offset"
+    "\\uA66EX"     #"Invalid unicode character: \\uA66EX, offset"
+    "\\uz"         #"Invalid unicode character: \\uz, offset"
+    "\\u0z"        #"Invalid unicode character: \\u0z, offset"
+    "\\oz"         #"Invalid digit: z, offset"
+    "\\ormfeed"    #"Invalid octal escape sequence length: 6, offset"
+    "\\o-1/2"      #"Invalid octal escape sequence length: 4, offset"
+    "#{\\o-1/2}"   #"Invalid octal escape sequence length: 4, offset"
+    "\\o12x"       #"Invalid digit: x, offset"
+    "\\o8"         #"Invalid digit: 8, offset")
 
   (are [s] (thrown? Exception (edn/read-string s))
     "\\u20"
@@ -277,20 +277,7 @@
     ;; issue-20 -- Trailing ^ included in symbols and keywords
     "sym^"          'sym
     "sym^meta"      'sym
-
-    ;; extras -- don't work in clojure.edn
-    "ns/1a"         (symbol "ns" "1a")
-    "ns/sym/"       (symbol "ns" "sym/")
-
-    ;; issue-9 -- allow colons in symbols
-    "A0:"           (symbol "A0:")
-    "A0::a"         (symbol "A0::a")
-    "A:::"          (symbol "A:::")
-
-    ;; issue-16 -- allow ', `, ~, @, ~@ in the middle of a symbol
-    "a`b"           (symbol "a`b")
-    "a~b"           (symbol "a~b")
-    "a@b"           (symbol "a@b"))
+)
 
   (are [s] (thrown? Exception (edn/read-string s))
     "ns/"
@@ -307,8 +294,9 @@
     "~sym"
     "@"
     "@sym"
-    "'"
-    "'sym"))
+    "A0:"
+    "a`b"
+    "a@b"))
     
 
 (deftest keywords-test
@@ -346,28 +334,20 @@
     ;; issue-9 -- allow colons in the middle of keywords
     ":a:b"           :a:b
 
-    ;; extras -- don't work in clojure.edn
-    ":ns/sym/"       (keyword "ns" "sym/")
-    ":ns/1a"         (keyword "ns" "1a")
-
-    ;; issue-9 -- allow colons in the middle of keywords
-    ":A0:"           (keyword "A0:")
-    ":A0::a"         (keyword "A0::a")
 
     ;; issue-16 -- allow ', `, ~, @, ~@ at the beginning of a keyword
     ":'a"            (keyword "'a")
     ":a'b"           (keyword "a'b")
-    ":`"             (keyword "`")
-    ":~"             (keyword "~")
-    ":@"             (keyword "@")
-    ":a`b"           (keyword "a`b")
-    ":a~b"           (keyword "a~b")
-    ":a@b"           (keyword "a@b")
 
     ;; issue-19 -- Trailing line comment included in symbol or keyword
     ;; issue-20 -- Trailing ^ included in symbols and keywords
     ":kw;asdf"        :kw
-    ":kw^:a[]"        :kw)
+    ":kw^:a[]"        :kw
+
+    ;; clojure.edn reads these: the first slash after the leading one separates the namespace
+    ":///"            (clojure.edn/read-string ":///")
+    "://a"            (clojure.edn/read-string "://a")
+    ":/!/!"           (clojure.edn/read-string ":/!/!"))
 
   (are [s] (thrown? Exception (edn/read-string s))
     ":"
@@ -379,16 +359,7 @@
 
     ;; issue-9 -- don't allow more than one colon at the beginning of a keyword
     "::kw"
-    ":::kw"
-
-    ;; extras -- don't work in clojure.edn
-    ":///"
-
-    ;; issue-17 -- Cannot parse ://a
-    "://a"
-
-    ;; issue-24 -- Cannot parse :/!/!
-    ":/!/!"))
+    ":::kw"))
 
 
 (deftest integers-test
@@ -446,14 +417,10 @@
     "36rABCXYZ" 36rABCXYZ
     "36RABCXYZ" 36RABCXYZ
     
-    ;; extras -- don't work in clojure.edn
-    "2r1111N"   (clojure.lang.BigInt/fromLong 2r1111)
-
     ;; issue-7 -- Cannot read number ending with #
     "1#"        1
     "[0#_a]"    [0]
     "{1/2#{}}"  {1/2 #{}}
-    "[1:kw]"    [1 :kw]
 
     ;; issue-11 -- Nested octal numbers are parsed as decimal
     ;; issue-22 -- Octal numbers ending in delimiter parsed as decimal
@@ -628,10 +595,7 @@
     ;; issue-18 -- whitespace allowed before namespace
     "#:,A{}"       {}
     "#: ns {:a 1}" {:ns/a 1}
-    "#:\nns{:a 1}" {:ns/a 1}
-
-    ;; issue-15 -- namespace can start with a number
-    "#:0{:A nil}"  {:0/A nil})
+    "#:\nns{:a 1}" {:ns/a 1})
 
   (are [s] (thrown? Exception (edn/read-string s))
     "#:ns/name{:a 1}"
@@ -688,12 +652,11 @@
     "#inst \"1985-04-12T23:20:50.52+05:00\"" #inst "1985-04-12T23:20:50.520+05:00"
     "#inst \n#_abc\n,,, \"1985\"" #inst "1985"
     "#inst\"1985\"" #inst"1985"
-    
-    ;; extras -- don't work in clojure.edn
-    "#inst \"1985-04-12T23:20:50.\"" #inst "1985-04-12T23:20:50")
+    "#inst \"1985-04-12T23:20:50-03:30\"" #inst "1985-04-13T02:50:50Z")
 
   (are [s] (thrown? Exception (edn/read-string s))
     "#inst"
+    "#inst \"1985-04-12T23:20:50.\""
     "#inst 1985"
     "#inst \"198\""
     "#inst \"1985-\""
@@ -749,7 +712,7 @@
     "#_#_"
     "#_#_1")
 
-  ;; issue #28 -- tag handlers should not be invoked inside discard
+  ;; tag handlers are invoked inside discard, as in clojure.edn
   (testing "tagged literals inside discard"
     (let [calls (atom 0)
           opts  {:readers {'foo (fn [val] (swap! calls inc) val)}
@@ -757,20 +720,16 @@
       (is (= nil (edn/read-string opts "#_ #foo [1 2 3]")))
       (is (= 42 (edn/read-string opts "#_ #foo [1 2 3] 42")))
       (is (= [1 4] (edn/read-string opts "[1 #_ #foo [2 3] 4]")))
-      (is (= 42 (edn/read-string opts "#_ #foo #foo [1 2 3] 42")))
-      (is (= 0 @calls))
-      (is (= [1 2 3] (edn/read-string opts "#_ 1 #foo [1 2 3]")))
-      (is (= 1 @calls)))
+      (is (= 3 @calls)))
 
     (let [calls (atom 0)
           opts  {:default (fn [tag val] (swap! calls inc) val)
                  :eof     nil}]
       (is (= 42 (edn/read-string opts "#_ #foo [1 2 3] 42")))
-      (is (= 0 @calls)))
+      (is (= 1 @calls)))
 
-    ;; unknown tags are skipped inside discard
-    (is (= 42 (edn/read-string {:eof nil} "#_ #unknown [1 2 3] 42")))
-    (is (= 42 (edn/read-string {:eof nil} "#_ #inst \"garbage\" 42")))))
+    (is (thrown? Exception (edn/read-string {:eof nil} "#_ #unknown [1 2 3] 42")))
+    (is (thrown? Exception (edn/read-string {:eof nil} "#_ #inst \"garbage\" 42")))))
 
 
 (deftest eof-test
@@ -789,18 +748,12 @@
     "1/2"       1/2
     "0/1"       0/1
     "-1/2"      -1/2
-    
-    ;; extras -- don't work in clojure.edn
-    "0xFF/0x02"   255/2
-    "100N/50N"    2
-    "2r1000/0177" 8/127
     "1000000000000000000000000000000/2" 1000000000000000000000000000000/2
-    "1/-2"        -1/2
-    "-1/-2"       1/2
 
-    ;; leading zero means octal in ratios too, same as in plain ints
-    "010/2"       4
-    "1/010"       1/8)
+    ;; ratio parts are decimal, leading zeros included
+    "010/2"       5
+    "08/1"        8
+    "1/010"       1/10)
 
   (are [s] (thrown? Exception (edn/read-string s))
     "1/"
@@ -808,8 +761,8 @@
     "1.1/2"
     "1/2.2"
     "1/2/3"
-    "08/1"
-    "1/08"))
+    "0xFF/0x02"
+    "1/-2"))
 
 ;; not in spec
 (deftest meta-test
@@ -821,10 +774,7 @@
     "^:k ^:w {}"  {:k true :w true} {}
     "^tag {}"     {:tag 'tag} {}
     "^{:k :v} {}" {:k :v} {}
-    "^:kw\n,,,{}" {:kw true} {}
-    
-    ;; extras -- don't work in clojure.edn
-    "^[tag] {}"   {:param-tags ['tag]} {}))
+    "^:kw\n,,,{}" {:kw true} {}))
 
 (deftest issue-2 ;; Hash map reading breaks if submaps contain identical keys
   (let [m {:field     :field1
