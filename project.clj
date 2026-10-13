@@ -5,7 +5,7 @@
   :dependencies
   [[org.clojure/clojure "1.12.5"]]
   :java-source-paths ["src"]
-  :javac-options ["--release" "8" "-Xlint:-options"]
+  :javac-options ["--release" "11" "-Xlint:-options"]
   :deploy-repositories
   {"clojars"
    {:url "https://clojars.org/repo"

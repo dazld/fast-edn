@@ -1,3 +1,22 @@
+### Fork: clojure.edn semantics
+
+Reads exactly what `clojure.edn` reads, and fails where it fails:
+
+- Symbols, keywords with `:` `/` `@` `` ` `` `~`, and non-plain numbers are interpreted by `clojure.lang.EdnReader`
+- `##NaN` `##Inf` `##-Inf` are `EdnReader`'s instances, so NaN-holding values compare equal across readers
+- Ratio parts are decimal; whole ratios read as Long (`50/50` is `1`)
+- Unicode whitespace ends tokens; `12:30` is an invalid number, not `12`
+- String escapes and character literals use `Character.digit`, as `EdnReader` does
+- `#^` metadata reads; vector metadata does not
+- Namespaced maps require a symbol namespace
+- Tag readers run inside `#_`
+- `#inst` before the Gregorian cutover, or outside the plain date-time shape, is read by `clojure.instant`
+- `#inst` with a negative offset and minutes (`-03:30`) reads instead of throwing
+
+Faster keywords: one-pass scan against a character-class table, and a process-wide keyword cache.
+
+Requires Java 11. Adds `:deps/prep-lib` so the repository works as a git dependency.
+
 ### 1.2.0 - July 7, 2026
 
 Fixed number parsing edge cases:

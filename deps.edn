@@ -1,7 +1,15 @@
-{:deps
+{:paths ["src" "target/classes"]
+ :deps
  {org.clojure/clojure {:mvn/version "1.12.5"}}
+ :deps/prep-lib
+ {:alias  :build
+  :fn     compile
+  :ensure "target/classes"}
  :aliases
- {:dev
+ {:build
+  {:deps       {io.github.clojure/tools.build {:mvn/version "0.10.14"}}
+   :ns-default build}
+  :dev
   {:extra-paths ["dev" "test"]
    :extra-deps
    {io.github.tonsky/clojure-plus {:mvn/version "1.7.2"}

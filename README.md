@@ -1,5 +1,36 @@
 # Fast EDN parser
 
+> **This fork reads exactly what `clojure.edn` reads.** Upstream fast-edn
+> deliberately departs from `clojure.edn` in places: it reads `:a0:`, `ns/1a`
+> and `a@b`, treats leading zeros in ratios as octal, accepts vector metadata,
+> and skips tag readers inside `#_`. This fork makes `clojure.edn/read-string`
+> the specification instead: for every input it returns the same value, with
+> the same types and metadata, or throws where `clojure.edn` throws. Error
+> messages may differ.
+>
+> - Symbol tokens, keywords containing `:` `/` `@` `` ` `` `~`, and any number
+>   other than a plain integer or float are interpreted by `clojure.lang.EdnReader`'s
+>   own `interpretToken` and `matchNumber`, so they cannot drift from Clojure.
+> - `##NaN`, `##Inf` and `##-Inf` are `EdnReader`'s own boxed instances, so a
+>   value holding NaN is `=` to the same value read by `clojure.edn`.
+> - Whitespace is `Character.isWhitespace`, numbers end only at whitespace or a
+>   macro character, and string escapes, character literals, `#^` metadata,
+>   namespaced maps and `#_` follow `EdnReader`.
+> - `#inst` uses java.time only for timestamps whose reading provably matches
+>   `clojure.instant` (full date-time with zone, year 1583 or later); every
+>   other timestamp is read by `clojure.instant`. Negative offsets with minutes
+>   (`-03:30`) read correctly.
+>
+> It is also faster than upstream on keyword-heavy data: a keyword is scanned
+> in one pass against a character-class table, and a process-wide cache maps
+> keyword characters to the interned `Keyword` without allocating.
+>
+> `test/fast_edn/clojure_edn_test.clj` checks parity against `clojure.edn` over
+> every literal in the example suite plus fuzzed tokens and timestamps.
+>
+> Requires Java 11. As a git dependency, run `clojure -X:deps prep` once to
+> compile the parser.
+
 > EDN format is very similar to JSON, thus it should parse as fast as JSON.
 
 Fast EDN is a drop-in replacement for `clojure.edn/read-string` that is roughly 5-7 times faster:
